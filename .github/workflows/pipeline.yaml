@@ -29,90 +29,16 @@ env:
 
 jobs:
   sast:
-    name: Auth GCP e SAST Semgrep
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.WIF_SA }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: 1. Autenticação GCP
-        run: |
-          set -euo pipefail
-          gcloud config set project "$PROJECT_ID"
-          gcloud auth list
-          gcloud projects describe "$PROJECT_ID" --format="value(projectId)"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: 2. SAST Semgrep
-        id: semgrep
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check semgrep
-          semgrep scan \
-            --config=auto \
-            --config=p/owasp-top-ten \
-            --config=p/cwe-top-25 \
-            --config=.semgrep.yml \
-            --json --output=semgrep-report.json || true
-          semgrep scan \
-            --config=auto \
-            --config=p/owasp-top-ten \
-            --config=p/cwe-top-25 \
-            --config=.semgrep.yml \
-            --sarif --output=semgrep-report.sarif \
-            --error
-
-      - name: Publicar relatório SAST (Artifacts)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-report
-          path: |
-            semgrep-report.json
-            semgrep-report.sarif
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Publicar SARIF no GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true
-        with:
-          sarif_file: semgrep-report.sarif
-
-      - name: Interromper pipeline se o SAST reprovar
-        if: always()
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.semgrep.outcome }}" != "success" ]; then
-            echo "SAST Semgrep reprovado por vulnerabilidades críticas (ERROR). Pipeline interrompido."
-            exit 1
-          fi
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          report = Path("semgrep-report.json")
-          if report.exists():
-              try:
-                  data = json.loads(report.read_text(encoding="utf-8"))
-                  results = data.get("results", [])
-                  errors = [r for r in results if r.get("extra", {}).get("severity") == "ERROR"]
-                  warnings = [r for r in results if r.get("extra", {}).get("severity") == "WARNING"]
-                  print(f"SAST Semgrep aprovado! Total de achados: {len(results)} (Erros: {len(errors)}, Avisos: {len(warnings)})")
-              except Exception as e:
-                  print(f"Resumo SAST gerado com sucesso: {e}")
-          PY
+    name: 1. SAST Semgrep
+    uses: leonardoalmeida095/reusable-workflows/.github/workflows/sast-semgrep-python.yaml@main
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    with:
+      workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      service_account: ${{ vars.WIF_SA }}
+      project_id: ${{ vars.PROJECT_ID }}
 
   deploy:
     name: 2. Deploy GCP
@@ -125,12 +51,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+      - name: Autenticação GCP via WIF
+        uses: leonardoalmeida095/reusable-workflows/actions/gcp-wif-auth@main
         with:
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ env.WIF_SA }}
-
-      - uses: google-github-actions/setup-gcloud@v2
+          project_id: ${{ env.PROJECT_ID }}
 
       - name: Revisões atuais
         id: revs
@@ -246,12 +172,12 @@ jobs:
     outputs:
       approved: ${{ steps.gate.outputs.approved }}
     steps:
-      - uses: google-github-actions/auth@v2
+      - name: Autenticação GCP via WIF
+        uses: leonardoalmeida095/reusable-workflows/actions/gcp-wif-auth@main
         with:
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ env.WIF_SA }}
-
-      - uses: google-github-actions/setup-gcloud@v2
+          project_id: ${{ env.PROJECT_ID }}
 
       - name: Atualizar job ZAP
         run: |
@@ -358,12 +284,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: google-github-actions/auth@v2
+      - name: Autenticação GCP via WIF
+        uses: leonardoalmeida095/reusable-workflows/actions/gcp-wif-auth@main
         with:
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ env.WIF_SA }}
-
-      - uses: google-github-actions/setup-gcloud@v2
+          project_id: ${{ env.PROJECT_ID }}
 
       - name: 4.1 Executar rollback
         env:
