@@ -11,19 +11,6 @@ permissions:
   security-events: write
 
 env:
-  PROJECT_ID: ${{ vars.PROJECT_ID }}
-  REGION: ${{ vars.REGION }}
-  WIF_SA: ${{ vars.WIF_SA }}
-  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-  APP_SA: ${{ vars.APP_SA }}
-  ARTIFACT_REPO: ${{ vars.ARTIFACT_REPO }}
-  TARGET_URL: ${{ vars.TARGET_URL }}
-  WEB_SERVICE: ${{ vars.WEB_SERVICE_NAME }}
-  API_SERVICE: ${{ vars.BACKEND_SERVICE_NAME}}
-  VPC_CONNECTOR: ${{ vars.VPC_CONNECTOR }}
-  GCS_BUCKET: ${{ vars.GCS_BUCKET }}
-  ZAP_JOB: ${{ vars.ZAP_JOB }}
-  ZAP_SA: ${{ vars.ZAP_SA }}
   REPORT_PREFIX: dast/${{ github.run_id }}
   CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
 
@@ -54,21 +41,21 @@ jobs:
       - name: Autenticação GCP via WIF
         uses: leonardoalmeida095/reusable-workflows/actions/gcp-wif-auth@main
         with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.WIF_SA }}
-          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.WIF_SA }}
+          project_id: ${{ vars.PROJECT_ID }}
 
       - name: Revisões atuais
         id: revs
         run: |
           set -euo pipefail
-          gcloud config set project "$PROJECT_ID"
+          gcloud config set project "${{ vars.PROJECT_ID }}"
 
           describe_revision() {
             local service="$1"
             local err
             err="$(mktemp)"
-            if gcloud run services describe "$service" --region="$REGION" --format="value(status.traffic[0].revisionName)" 2>"$err"; then
+            if gcloud run services describe "$service" --region="${{ vars.REGION }}" --format="value(status.traffic[0].revisionName)" 2>"$err"; then
               rm -f "$err"
               return 0
             fi
@@ -81,8 +68,8 @@ jobs:
             return 1
           }
 
-          web_prev="$(describe_revision "$WEB_SERVICE")"
-          api_prev="$(describe_revision "$API_SERVICE")"
+          web_prev="$(describe_revision "${{ vars.WEB_SERVICE_NAME }}")"
+          api_prev="$(describe_revision "${{ vars.BACKEND_SERVICE_NAME }}")"
           echo "web_previous=${web_prev}" >> "$GITHUB_OUTPUT"
           echo "api_previous=${api_prev}" >> "$GITHUB_OUTPUT"
           echo "Frontend anterior: ${web_prev:-nenhuma}"
@@ -91,11 +78,11 @@ jobs:
       - name: Build e push
         run: |
           set -euo pipefail
-          host="${REGION}-docker.pkg.dev"
+          host="${{ vars.REGION }}-docker.pkg.dev"
           gcloud auth configure-docker "$host" --quiet
-          api_image="${host}/${PROJECT_ID}/${ARTIFACT_REPO}/backend:${GITHUB_SHA}"
-          web_image="${host}/${PROJECT_ID}/${ARTIFACT_REPO}/frontend:${GITHUB_SHA}"
-          zap_image="${host}/${PROJECT_ID}/${ARTIFACT_REPO}/zap:${GITHUB_SHA}"
+          api_image="${host}/${{ vars.PROJECT_ID }}/${{ vars.ARTIFACT_REPO }}/backend:${GITHUB_SHA}"
+          web_image="${host}/${{ vars.PROJECT_ID }}/${{ vars.ARTIFACT_REPO }}/frontend:${GITHUB_SHA}"
+          zap_image="${host}/${{ vars.PROJECT_ID }}/${{ vars.ARTIFACT_REPO }}/zap:${GITHUB_SHA}"
           docker build -t "$api_image" api
           docker build -t "$web_image" web
           docker build -t "$zap_image" zap
@@ -109,14 +96,14 @@ jobs:
       - name: 2.1 Deploy API interna
         run: |
           set -euo pipefail
-          gcloud run deploy "$API_SERVICE" \
-            --region="$REGION" \
+          gcloud run deploy "${{ vars.BACKEND_SERVICE_NAME }}" \
+            --region="${{ vars.REGION }}" \
             --image="$API_IMAGE" \
-            --service-account="$APP_SA" \
+            --service-account="${{ vars.APP_SA }}" \
             --ingress=all \
             --invoker-iam-check \
             --no-allow-unauthenticated \
-            --vpc-connector="$VPC_CONNECTOR" \
+            --vpc-connector="${{ vars.VPC_CONNECTOR }}" \
             --vpc-egress=private-ranges-only \
             --port=8080 \
             --memory=512Mi \
@@ -125,25 +112,25 @@ jobs:
             --concurrency=20 \
             --min-instances=0 \
             --max-instances=1 \
-            --set-env-vars="SERVICE_NAME=${API_SERVICE}"
+            --set-env-vars="SERVICE_NAME=${{ vars.BACKEND_SERVICE_NAME }}"
 
       - name: Permissão do frontend na API
         run: |
           set -euo pipefail
-          gcloud run services add-iam-policy-binding "$API_SERVICE" \
-            --region="$REGION" \
-            --member="serviceAccount:${APP_SA}" \
+          gcloud run services add-iam-policy-binding "${{ vars.BACKEND_SERVICE_NAME }}" \
+            --region="${{ vars.REGION }}" \
+            --member="serviceAccount:${{ vars.APP_SA }}" \
             --role="roles/run.invoker"
 
       - name: 2.2 Deploy frontend
         run: |
           set -euo pipefail
-          project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-          api_url="https://${API_SERVICE}-${project_number}.${REGION}.run.app"
-          gcloud run deploy "$WEB_SERVICE" \
-            --region="$REGION" \
+          project_number="$(gcloud projects describe "${{ vars.PROJECT_ID }}" --format='value(projectNumber)')"
+          api_url="https://${{ vars.BACKEND_SERVICE_NAME }}-${project_number}.${{ vars.REGION }}.run.app"
+          gcloud run deploy "${{ vars.WEB_SERVICE_NAME }}" \
+            --region="${{ vars.REGION }}" \
             --image="$WEB_IMAGE" \
-            --service-account="$APP_SA" \
+            --service-account="${{ vars.APP_SA }}" \
             --ingress=internal-and-cloud-load-balancing \
             --no-invoker-iam-check \
             --port=8080 \
@@ -153,14 +140,14 @@ jobs:
             --concurrency=80 \
             --min-instances=0 \
             --max-instances=2 \
-            --set-env-vars="API_URL=${api_url},API_AUTH=true,SERVICE_NAME=${WEB_SERVICE}"
+            --set-env-vars="API_URL=${api_url},API_AUTH=true,SERVICE_NAME=${{ vars.WEB_SERVICE_NAME }}"
           echo "API_URL=${api_url}"
-          gcloud run services remove-iam-policy-binding "$WEB_SERVICE" \
-            --region="$REGION" \
+          gcloud run services remove-iam-policy-binding "${{ vars.WEB_SERVICE_NAME }}" \
+            --region="${{ vars.REGION }}" \
             --member="allUsers" \
             --role="roles/run.invoker" || true
-          gcloud run services remove-iam-policy-binding "$WEB_SERVICE" \
-            --region="$REGION" \
+          gcloud run services remove-iam-policy-binding "${{ vars.WEB_SERVICE_NAME }}" \
+            --region="${{ vars.REGION }}" \
             --member="allAuthenticatedUsers" \
             --role="roles/run.invoker" || true
 
@@ -175,19 +162,19 @@ jobs:
       - name: Autenticação GCP via WIF
         uses: leonardoalmeida095/reusable-workflows/actions/gcp-wif-auth@main
         with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.WIF_SA }}
-          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.WIF_SA }}
+          project_id: ${{ vars.PROJECT_ID }}
 
       - name: Atualizar job ZAP
         run: |
           set -euo pipefail
-          gcloud config set project "$PROJECT_ID"
-          gcloud run jobs deploy "$ZAP_JOB" \
-            --region="$REGION" \
-            --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/zap:${GITHUB_SHA}" \
-            --service-account="$ZAP_SA" \
-            --vpc-connector="$VPC_CONNECTOR" \
+          gcloud config set project "${{ vars.PROJECT_ID }}"
+          gcloud run jobs deploy "${{ vars.ZAP_JOB }}" \
+            --region="${{ vars.REGION }}" \
+            --image="${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.ARTIFACT_REPO }}/zap:${GITHUB_SHA}" \
+            --service-account="${{ vars.ZAP_SA }}" \
+            --vpc-connector="${{ vars.VPC_CONNECTOR }}" \
             --vpc-egress=private-ranges-only \
             --execution-environment=gen2 \
             --memory=2Gi \
@@ -195,7 +182,7 @@ jobs:
             --task-timeout=900 \
             --max-retries=0 \
             --tasks=1 \
-            --set-env-vars="TARGET_URL=${TARGET_URL},GCS_BUCKET=${GCS_BUCKET},REPORT_PREFIX=${REPORT_PREFIX},ZAP_FAIL_ON=HIGH"
+            --set-env-vars="TARGET_URL=${{ vars.TARGET_URL }},GCS_BUCKET=${{ vars.GCS_BUCKET }},REPORT_PREFIX=${REPORT_PREFIX},ZAP_FAIL_ON=HIGH"
 
       - name: Esperar o frontend no load balancer
         id: health
@@ -203,8 +190,8 @@ jobs:
           set -euo pipefail
           ok=0
           for _ in $(seq 1 20); do
-            code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${TARGET_URL}/health/ready" || true)"
-            echo "health ${TARGET_URL}/health/ready -> ${code}"
+            code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${{ vars.TARGET_URL }}/health/ready" || true)"
+            echo "health ${{ vars.TARGET_URL }}/health/ready -> ${code}"
             if [ "$code" = "200" ]; then
               ok=1
               break
@@ -222,7 +209,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          gcloud run jobs execute "$ZAP_JOB" --region="$REGION" --wait
+          gcloud run jobs execute "${{ vars.ZAP_JOB }}" --region="${{ vars.REGION }}" --wait
 
       - name: 3.2 Baixar relatório
         if: always()
@@ -230,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p zap-report
-          gcloud storage cp "gs://${GCS_BUCKET}/${REPORT_PREFIX}/*" zap-report/
+          gcloud storage cp "gs://${{ vars.GCS_BUCKET }}/${REPORT_PREFIX}/*" zap-report/
 
       - name: Publicar relatório DAST
         if: always()
@@ -258,8 +245,8 @@ jobs:
           set -euo pipefail
           {
             echo "## DAST"
-            echo "- Alvo: ${TARGET_URL}"
-            echo "- Relatório: gs://${GCS_BUCKET}/${REPORT_PREFIX}/"
+            echo "- Alvo: ${{ vars.TARGET_URL }}"
+            echo "- Relatório: gs://${{ vars.GCS_BUCKET }}/${REPORT_PREFIX}/"
             echo "- Aprovado: ${{ steps.gate.outputs.approved }}"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -f zap-report/report.md ]; then
@@ -287,9 +274,9 @@ jobs:
       - name: Autenticação GCP via WIF
         uses: leonardoalmeida095/reusable-workflows/actions/gcp-wif-auth@main
         with:
-          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.WIF_SA }}
-          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.WIF_SA }}
+          project_id: ${{ vars.PROJECT_ID }}
 
       - name: 4.1 Executar rollback
         env:
@@ -297,19 +284,19 @@ jobs:
           API_PREVIOUS: ${{ needs.deploy.outputs.api_previous }}
         run: |
           set -euo pipefail
-          gcloud config set project "$PROJECT_ID"
+          gcloud config set project "${{ vars.PROJECT_ID }}"
           if [ -n "${WEB_PREVIOUS}" ]; then
-            echo "Rollback ${WEB_SERVICE} -> ${WEB_PREVIOUS}"
-            gcloud run services update-traffic "$WEB_SERVICE" \
-              --region="$REGION" \
+            echo "Rollback ${{ vars.WEB_SERVICE_NAME }} -> ${WEB_PREVIOUS}"
+            gcloud run services update-traffic "${{ vars.WEB_SERVICE_NAME }}" \
+              --region="${{ vars.REGION }}" \
               --to-revisions="${WEB_PREVIOUS}=100"
           else
             echo "Frontend sem revisão anterior."
           fi
           if [ -n "${API_PREVIOUS}" ]; then
-            echo "Rollback ${API_SERVICE} -> ${API_PREVIOUS}"
-            gcloud run services update-traffic "$API_SERVICE" \
-              --region="$REGION" \
+            echo "Rollback ${{ vars.BACKEND_SERVICE_NAME }} -> ${API_PREVIOUS}"
+            gcloud run services update-traffic "${{ vars.BACKEND_SERVICE_NAME }}" \
+              --region="${{ vars.REGION }}" \
               --to-revisions="${API_PREVIOUS}=100"
           else
             echo "API sem revisão anterior."
