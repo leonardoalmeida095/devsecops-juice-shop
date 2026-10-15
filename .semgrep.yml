@@ -19,8 +19,7 @@ rules:
       cwe: "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
       owasp: "A03:2021 - Injection"
       category: security
-    patterns:
-      - pattern: subprocess.$FUNC(..., shell=True, ...)
+    pattern: subprocess.$FUNC(..., shell=True, ...)
 
   - id: hardcoded-secret-key
     languages: [python]
@@ -31,12 +30,8 @@ rules:
       owasp: "A07:2021 - Identification and Authentication Failures"
       category: security
     patterns:
-      - pattern-either:
-          - pattern: $VAR = "..."
-        inside: |
-          def $FUNC(...):
-            ...
-    pattern-regex: (?i)(api[_-]?key|secret[_-]?key|auth[_-]?token|password)\s*=\s*['"][a-zA-Z0-9_\-\.]{16,}['"]
+      - pattern: $VAR = "..."
+      - pattern-regex: (?i)(api[_-]?key|secret[_-]?key|auth[_-]?token|password)\s*=\s*['"][a-zA-Z0-9_\-\.]{16,}['"]
 
   - id: jinja2-autoescape-disabled
     languages: [python]
@@ -46,19 +41,16 @@ rules:
       cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-Site Scripting')"
       owasp: "A03:2021 - Injection"
       category: security
-    patterns:
-      - pattern: jinja2.Environment(..., autoescape=False, ...)
+    pattern: jinja2.Environment(..., autoescape=False, ...)
 
-  - id: raw-sql-string-interpolation
+  - id: raw-sql-string-formatting
     languages: [python]
     severity: WARNING
-    message: "Interpolação direta de strings em comandos SQL pode resultar em SQL Injection. Utilize queries parametrizadas."
+    message: "Formatação direta de strings em comandos SQL pode resultar em SQL Injection. Utilize queries parametrizadas."
     metadata:
       cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
       owasp: "A03:2021 - Injection"
       category: security
     pattern-either:
-      - pattern: $DB.execute(f"SELECT ... {$VAR} ...")
-      - pattern: $DB.execute(f"INSERT ... {$VAR} ...")
-      - pattern: $DB.execute(f"UPDATE ... {$VAR} ...")
-      - pattern: $DB.execute(f"DELETE ... {$VAR} ...")
+      - pattern: $DB.execute("..." % $VAR)
+      - pattern: $DB.execute("...".format(...))
