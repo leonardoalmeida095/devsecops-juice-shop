@@ -15,8 +15,17 @@ env:
   CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
 
 jobs:
-  sast:
-    name: 1. SAST Semgrep
+  auth-wif:
+    name: 1. Autenticacao GCP via WIF
+    uses: leonardoalmeida095/reusable-workflows/.github/workflows/gcp-wif-auth.yaml@main
+    with:
+      workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      service_account: ${{ vars.WIF_SA }}
+      project_id: ${{ vars.PROJECT_ID }}
+
+  sast-semgrep:
+    name: 2. SAST Semgrep
+    needs: auth-wif
     uses: leonardoalmeida095/reusable-workflows/.github/workflows/sast-semgrep-python.yaml@main
     permissions:
       contents: read
@@ -28,8 +37,8 @@ jobs:
       project_id: ${{ vars.PROJECT_ID }}
 
   deploy:
-    name: 2. Deploy GCP
-    needs: sast
+    name: 3. Deploy GCP
+    needs: sast-semgrep
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
