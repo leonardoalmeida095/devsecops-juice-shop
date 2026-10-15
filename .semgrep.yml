@@ -1,0 +1,64 @@
+rules:
+  - id: dangerous-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: "Uso inseguro de 'eval' ou 'exec'. Permite execução de código arbitrário se alimentado com entradas não confiáveis."
+    metadata:
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')"
+      owasp: "A03:2021 - Injection"
+      category: security
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: dangerous-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: "Uso de 'subprocess' com 'shell=True' pode levar a Command Injection se entradas de usuário forem concatenadas no comando."
+    metadata:
+      cwe: "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp: "A03:2021 - Injection"
+      category: security
+    patterns:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+
+  - id: hardcoded-secret-key
+    languages: [python]
+    severity: ERROR
+    message: "Possível chave de segurança ou segredo 'hardcoded' no código-fonte. Utilize variáveis de ambiente ou Secret Manager."
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = "..."
+        inside: |
+          def $FUNC(...):
+            ...
+    pattern-regex: (?i)(api[_-]?key|secret[_-]?key|auth[_-]?token|password)\s*=\s*['"][a-zA-Z0-9_\-\.]{16,}['"]
+
+  - id: jinja2-autoescape-disabled
+    languages: [python]
+    severity: ERROR
+    message: "Autoescape desativado no Jinja2 pode permitir ataques de Cross-Site Scripting (XSS)."
+    metadata:
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-Site Scripting')"
+      owasp: "A03:2021 - Injection"
+      category: security
+    patterns:
+      - pattern: jinja2.Environment(..., autoescape=False, ...)
+
+  - id: raw-sql-string-interpolation
+    languages: [python]
+    severity: WARNING
+    message: "Interpolação direta de strings em comandos SQL pode resultar em SQL Injection. Utilize queries parametrizadas."
+    metadata:
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      category: security
+    pattern-either:
+      - pattern: $DB.execute(f"SELECT ... {$VAR} ...")
+      - pattern: $DB.execute(f"INSERT ... {$VAR} ...")
+      - pattern: $DB.execute(f"UPDATE ... {$VAR} ...")
+      - pattern: $DB.execute(f"DELETE ... {$VAR} ...")

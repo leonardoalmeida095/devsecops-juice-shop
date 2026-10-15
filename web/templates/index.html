@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Visita · Sec App{% endblock %}
+{% block content %}
+<h1>O que o navegador entregou</h1>
+<p class="lede">O frontend lê o pedido e encaminha esses campos para a API. A coluna da direita é o que a API viu nessa chamada interna.</p>
+<section class="hops">
+  <article>
+    <h2>Enviado pelo frontend</h2>
+    <dl>
+      <dt>User-Agent</dt><dd>{{ sent.user_agent }}</dd>
+      <dt>Accept-Language</dt><dd>{{ sent.accept_language }}</dd>
+      <dt>Accept</dt><dd>{{ sent.accept }}</dd>
+      <dt>Nota</dt><dd>{{ sent.note or "—" }}</dd>
+    </dl>
+  </article>
+  <article>
+    <h2>Visto pela API</h2>
+    <dl>
+      <dt>Serviço</dt><dd>{{ api.service }}</dd>
+      <dt>Revisão</dt><dd>{{ api.revision }}</dd>
+      <dt>Método</dt><dd>{{ api.method }}</dd>
+      <dt>Caminho</dt><dd>{{ api.path }}</dd>
+      <dt>Cliente</dt><dd>{{ api.client }}</dd>
+      {% for key, value in (api.headers or {}).items() %}
+      <dt>{{ key }}</dt><dd>{{ value }}</dd>
+      {% endfor %}
+    </dl>
+  </article>
+</section>
+<form method="post" action="/">
+  <label for="note">Nota para a API</label>
+  <input id="note" name="note" maxlength="200" autocomplete="off">
+  <button type="submit">Enviar</button>
+</form>
+{% endblock %}

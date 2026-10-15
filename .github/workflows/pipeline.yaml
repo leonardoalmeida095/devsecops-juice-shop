@@ -1,0 +1,390 @@
+name: Pipeline SAST/DAST
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+
+env:
+  PROJECT_ID: ${{ vars.PROJECT_ID }}
+  REGION: ${{ vars.REGION }}
+  WIF_SA: ${{ vars.WIF_SA }}
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  APP_SA: ${{ vars.APP_SA }}
+  ARTIFACT_REPO: ${{ vars.ARTIFACT_REPO }}
+  TARGET_URL: ${{ vars.TARGET_URL }}
+  WEB_SERVICE: ${{ vars.WEB_SERVICE_NAME }}
+  API_SERVICE: ${{ vars.BACKEND_SERVICE_NAME}}
+  VPC_CONNECTOR: ${{ vars.VPC_CONNECTOR }}
+  GCS_BUCKET: ${{ vars.GCS_BUCKET }}
+  ZAP_JOB: ${{ vars.ZAP_JOB }}
+  ZAP_SA: ${{ vars.ZAP_SA }}
+  REPORT_PREFIX: dast/${{ github.run_id }}
+  CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+jobs:
+  sast:
+    name: Auth GCP e SAST Semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.WIF_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: 1. Autenticação GCP
+        run: |
+          set -euo pipefail
+          gcloud config set project "$PROJECT_ID"
+          gcloud auth list
+          gcloud projects describe "$PROJECT_ID" --format="value(projectId)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 2. SAST Semgrep
+        id: semgrep
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check semgrep
+          semgrep scan \
+            --config=auto \
+            --config=p/owasp-top-ten \
+            --config=p/cwe-top-25 \
+            --config=.semgrep.yml \
+            --json --output=semgrep-report.json || true
+          semgrep scan \
+            --config=auto \
+            --config=p/owasp-top-ten \
+            --config=p/cwe-top-25 \
+            --config=.semgrep.yml \
+            --sarif --output=semgrep-report.sarif \
+            --error
+
+      - name: Publicar relatório SAST (Artifacts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: |
+            semgrep-report.json
+            semgrep-report.sarif
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publicar SARIF no GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: semgrep-report.sarif
+
+      - name: Interromper pipeline se o SAST reprovar
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.semgrep.outcome }}" != "success" ]; then
+            echo "SAST Semgrep reprovado por vulnerabilidades críticas (ERROR). Pipeline interrompido."
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = Path("semgrep-report.json")
+          if report.exists():
+              try:
+                  data = json.loads(report.read_text(encoding="utf-8"))
+                  results = data.get("results", [])
+                  errors = [r for r in results if r.get("extra", {}).get("severity") == "ERROR"]
+                  warnings = [r for r in results if r.get("extra", {}).get("severity") == "WARNING"]
+                  print(f"SAST Semgrep aprovado! Total de achados: {len(results)} (Erros: {len(errors)}, Avisos: {len(warnings)})")
+              except Exception as e:
+                  print(f"Resumo SAST gerado com sucesso: {e}")
+          PY
+
+  deploy:
+    name: 2. Deploy GCP
+    needs: sast
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      web_previous: ${{ steps.revs.outputs.web_previous }}
+      api_previous: ${{ steps.revs.outputs.api_previous }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.WIF_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Revisões atuais
+        id: revs
+        run: |
+          set -euo pipefail
+          gcloud config set project "$PROJECT_ID"
+
+          describe_revision() {
+            local service="$1"
+            local err
+            err="$(mktemp)"
+            if gcloud run services describe "$service" --region="$REGION" --format="value(status.traffic[0].revisionName)" 2>"$err"; then
+              rm -f "$err"
+              return 0
+            fi
+            if grep -Eq "NOT_FOUND|not found|Cannot find" "$err"; then
+              rm -f "$err"
+              return 0
+            fi
+            cat "$err" >&2
+            rm -f "$err"
+            return 1
+          }
+
+          web_prev="$(describe_revision "$WEB_SERVICE")"
+          api_prev="$(describe_revision "$API_SERVICE")"
+          echo "web_previous=${web_prev}" >> "$GITHUB_OUTPUT"
+          echo "api_previous=${api_prev}" >> "$GITHUB_OUTPUT"
+          echo "Frontend anterior: ${web_prev:-nenhuma}"
+          echo "API anterior: ${api_prev:-nenhuma}"
+
+      - name: Build e push
+        run: |
+          set -euo pipefail
+          host="${REGION}-docker.pkg.dev"
+          gcloud auth configure-docker "$host" --quiet
+          api_image="${host}/${PROJECT_ID}/${ARTIFACT_REPO}/backend:${GITHUB_SHA}"
+          web_image="${host}/${PROJECT_ID}/${ARTIFACT_REPO}/frontend:${GITHUB_SHA}"
+          zap_image="${host}/${PROJECT_ID}/${ARTIFACT_REPO}/zap:${GITHUB_SHA}"
+          docker build -t "$api_image" api
+          docker build -t "$web_image" web
+          docker build -t "$zap_image" zap
+          docker push "$api_image"
+          docker push "$web_image"
+          docker push "$zap_image"
+          echo "API_IMAGE=${api_image}" >> "$GITHUB_ENV"
+          echo "WEB_IMAGE=${web_image}" >> "$GITHUB_ENV"
+          echo "ZAP_IMAGE=${zap_image}" >> "$GITHUB_ENV"
+
+      - name: 2.1 Deploy API interna
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$API_SERVICE" \
+            --region="$REGION" \
+            --image="$API_IMAGE" \
+            --service-account="$APP_SA" \
+            --ingress=all \
+            --invoker-iam-check \
+            --no-allow-unauthenticated \
+            --vpc-connector="$VPC_CONNECTOR" \
+            --vpc-egress=private-ranges-only \
+            --port=8080 \
+            --memory=512Mi \
+            --cpu=1 \
+            --timeout=60 \
+            --concurrency=20 \
+            --min-instances=0 \
+            --max-instances=1 \
+            --set-env-vars="SERVICE_NAME=${API_SERVICE}"
+
+      - name: Permissão do frontend na API
+        run: |
+          set -euo pipefail
+          gcloud run services add-iam-policy-binding "$API_SERVICE" \
+            --region="$REGION" \
+            --member="serviceAccount:${APP_SA}" \
+            --role="roles/run.invoker"
+
+      - name: 2.2 Deploy frontend
+        run: |
+          set -euo pipefail
+          project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+          api_url="https://${API_SERVICE}-${project_number}.${REGION}.run.app"
+          gcloud run deploy "$WEB_SERVICE" \
+            --region="$REGION" \
+            --image="$WEB_IMAGE" \
+            --service-account="$APP_SA" \
+            --ingress=internal-and-cloud-load-balancing \
+            --no-invoker-iam-check \
+            --port=8080 \
+            --memory=512Mi \
+            --cpu=1 \
+            --timeout=60 \
+            --concurrency=80 \
+            --min-instances=0 \
+            --max-instances=2 \
+            --set-env-vars="API_URL=${api_url},API_AUTH=true,SERVICE_NAME=${WEB_SERVICE}"
+          echo "API_URL=${api_url}"
+          gcloud run services remove-iam-policy-binding "$WEB_SERVICE" \
+            --region="$REGION" \
+            --member="allUsers" \
+            --role="roles/run.invoker" || true
+          gcloud run services remove-iam-policy-binding "$WEB_SERVICE" \
+            --region="$REGION" \
+            --member="allAuthenticatedUsers" \
+            --role="roles/run.invoker" || true
+
+  dast:
+    name: 3. DAST ZAP
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      approved: ${{ steps.gate.outputs.approved }}
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.WIF_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Atualizar job ZAP
+        run: |
+          set -euo pipefail
+          gcloud config set project "$PROJECT_ID"
+          gcloud run jobs deploy "$ZAP_JOB" \
+            --region="$REGION" \
+            --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPO}/zap:${GITHUB_SHA}" \
+            --service-account="$ZAP_SA" \
+            --vpc-connector="$VPC_CONNECTOR" \
+            --vpc-egress=private-ranges-only \
+            --execution-environment=gen2 \
+            --memory=2Gi \
+            --cpu=2 \
+            --task-timeout=900 \
+            --max-retries=0 \
+            --tasks=1 \
+            --set-env-vars="TARGET_URL=${TARGET_URL},GCS_BUCKET=${GCS_BUCKET},REPORT_PREFIX=${REPORT_PREFIX},ZAP_FAIL_ON=HIGH"
+
+      - name: Esperar o frontend no load balancer
+        id: health
+        run: |
+          set -euo pipefail
+          ok=0
+          for _ in $(seq 1 20); do
+            code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${TARGET_URL}/health/ready" || true)"
+            echo "health ${TARGET_URL}/health/ready -> ${code}"
+            if [ "$code" = "200" ]; then
+              ok=1
+              break
+            fi
+            sleep 15
+          done
+          if [ "$ok" != "1" ]; then
+            echo "O load balancer não ficou pronto."
+            exit 1
+          fi
+
+      - name: 3.1 Executar DAST
+        id: zap
+        if: steps.health.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gcloud run jobs execute "$ZAP_JOB" --region="$REGION" --wait
+
+      - name: 3.2 Baixar relatório
+        if: always()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p zap-report
+          gcloud storage cp "gs://${GCS_BUCKET}/${REPORT_PREFIX}/*" zap-report/
+
+      - name: Publicar relatório DAST
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Resultado
+        id: gate
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.health.outcome }}" = "success" ] && [ "${{ steps.zap.outcome }}" = "success" ]; then
+            echo "approved=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "approved=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 4. Sumário do resultado
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## DAST"
+            echo "- Alvo: ${TARGET_URL}"
+            echo "- Relatório: gs://${GCS_BUCKET}/${REPORT_PREFIX}/"
+            echo "- Aprovado: ${{ steps.gate.outputs.approved }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f zap-report/report.md ]; then
+            {
+              echo
+              echo '```'
+              head -n 30 zap-report/report.md
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: DAST reprovado
+        if: always() && steps.gate.outputs.approved != 'true'
+        run: |
+          echo "DAST reprovado."
+          exit 1
+
+  rollback:
+    name: 4.1 Rollback da versão
+    needs: [deploy, dast]
+    if: always() && needs.deploy.result == 'success' && needs.dast.outputs.approved == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.WIF_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: 4.1 Executar rollback
+        env:
+          WEB_PREVIOUS: ${{ needs.deploy.outputs.web_previous }}
+          API_PREVIOUS: ${{ needs.deploy.outputs.api_previous }}
+        run: |
+          set -euo pipefail
+          gcloud config set project "$PROJECT_ID"
+          if [ -n "${WEB_PREVIOUS}" ]; then
+            echo "Rollback ${WEB_SERVICE} -> ${WEB_PREVIOUS}"
+            gcloud run services update-traffic "$WEB_SERVICE" \
+              --region="$REGION" \
+              --to-revisions="${WEB_PREVIOUS}=100"
+          else
+            echo "Frontend sem revisão anterior."
+          fi
+          if [ -n "${API_PREVIOUS}" ]; then
+            echo "Rollback ${API_SERVICE} -> ${API_PREVIOUS}"
+            gcloud run services update-traffic "$API_SERVICE" \
+              --region="$REGION" \
+              --to-revisions="${API_PREVIOUS}=100"
+          else
+            echo "API sem revisão anterior."
+          fi

@@ -1,0 +1,20 @@
+services:
+  api:
+    build: ./api
+    ports:
+      - "8081:8080"
+    environment:
+      PORT: "8080"
+      SERVICE_NAME: run-svc-backend
+
+  web:
+    build: ./web
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      API_URL: http://api:8080
+      API_AUTH: "false"
+      SERVICE_NAME: run-svc-frontend
+    depends_on:
+      - api
